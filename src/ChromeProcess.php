@@ -19,26 +19,39 @@ class ChromeProcess {
      * Detecta el binario de Chrome/Chromium instalado
      * en el sistema, probando candidatos comunes.
      * Lanza DevToolsException si no encuentra ninguno.
+     *
+     * @param callable|null $binaryChecker Función que recibe
+     * un nombre de binario y retorna su ruta o '' si no
+     * existe — por defecto usa `which`. Inyectable para tests
+     * (evita depender de qué esté instalado en la máquina
+     * que corre la suite).
      */
-    public static function detectBinary(): string {
+    public static function detectBinary(?callable $binaryChecker = null): string {
+        $checker = $binaryChecker ?? function (string $bin): string {
+            return trim((string) shell_exec("which {$bin} 2>/dev/null"));
+        };
+
         $candidates = [
             'google-chrome', 'google-chrome-stable',
             'chromium', 'chromium-browser',
         ];
-        $found = '';
 
-        foreach ($candidates as $bin) {
-            $path = trim((string)shell_exec(
-                "which {$bin} 2>/dev/null"
-            ));
-            if ($path !== '') { $found = $path; break; }
-        }
+        $found = '';
+        foreach ($candidates as $bin):
+            $path = $checker($bin);
+            if ($path !== ''):
+                $found = $path;
+                break;
+            endif;
+        endforeach;
 
         if ($found === ''):
             throw new DevToolsException(
-                "No se encontró Chrome ni Chromium.\n" .
+                "No se encontró Chrome ni Chromium instalado.\n" .
                 "Instala uno con:\n" .
-                "  sudo apt install chromium-browser"
+                "  sudo apt install chromium-browser\n" .
+                "o descarga Google Chrome desde " .
+                "https://www.google.com/chrome/"
             );
         endif;
 

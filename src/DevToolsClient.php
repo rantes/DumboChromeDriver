@@ -27,6 +27,7 @@ class DevToolsClient {
 
         // Habilitar el dominio Runtime antes de evaluar
         $this->_session->send('Runtime.enable');
+        $this->_initElementRegistry();
     }
 
     /**
@@ -68,6 +69,10 @@ class DevToolsClient {
             'window.location.href = ' . json_encode($url)
         );
         $this->_waitForLoad();
+        // Una navegación real recarga la página — borra
+        // window.__dcd__ y todos los ids registrados. Los
+        // Element de la página anterior dejan de ser válidos.
+        $this->_initElementRegistry();
     }
 
     /**
@@ -284,5 +289,163 @@ class DevToolsClient {
             'domain' => $domain,
             'path'   => '/',
         ]);
+    }
+
+    /**
+     * Inyecta la tabla window.__dcd__ que mapea ids lógicos
+     * a nodos reales del DOM — permite que Element encadene
+     * operaciones (closest → count) sobre el MISMO nodo
+     * encontrado, en vez de que cada paso re-evalúe el
+     * selector desde cero. Idempotente: tolera llamadas
+     * repetidas sin duplicar el registro.
+     */
+    private function _initElementRegistry(): void {
+        $this->evaluate(<<<'JS'
+        window.__dcd__ = window.__dcd__ || {
+            _store: new Map(),
+            _nextId: 1,
+            register(node) {
+                if (!node) return null;
+                const id = 'el_' + (this._nextId++);
+                this._store.set(id, node);
+                return id;
+            },
+            get(id) {
+                return this._store.get(id) || null;
+            }
+        };
+        undefined
+        JS);
+    }
+
+    /**
+     * Busca el primer elemento en todo el documento.
+     * Retorna null si no existe (a diferencia de los
+     * métodos v2 que lanzaban excepción — find() es
+     * la versión "segura" para permitir chequear
+     * existencia antes de actuar).
+     */
+    public function find(string $selector): ?Element {
+        $id = $this->evaluate(
+            'window.__dcd__.register(document.querySelector(' .
+            json_encode($selector) . '))'
+        );
+        return $id !== null ? new Element($this, $id) : null;
+    }
+
+    public function findAll(string $selector): array {
+        $ids = $this->evaluate(<<<JS
+        Array.from(document.querySelectorAll({$this->_json($selector)}))
+            .map(el => window.__dcd__.register(el))
+        JS);
+        return array_map(fn($id) => new Element($this, $id), $ids ?? []);
+    }
+
+    /**
+     * Busca el primer elemento de tipo $tag cuyo
+     * textContent incluye $text.
+     */
+    public function findByText(string $tag, string $text): ?Element {
+        $id = $this->evaluate(<<<JS
+        (() => {
+            const els = Array.from(document.querySelectorAll(
+                {$this->_json($tag)}
+            ));
+            const match = els.find(
+                el => el.textContent.includes({$this->_json($text)})
+            );
+            return window.__dcd__.register(match || null);
+        })()
+        JS);
+        return $id !== null ? new Element($this, $id) : null;
+    }
+
+    /**
+     * Métodos internos — prefijo _ señala que son parte del
+     * contrato con Element, no API pública para el test.
+     */
+    public function _findWithin(string $parentId, string $selector): ?Element {
+        $id = $this->evaluate(
+            'window.__dcd__.register(window.__dcd__.get(' .
+            json_encode($parentId) . ')?.querySelector(' .
+            json_encode($selector) . '))'
+        );
+        return $id !== null ? new Element($this, $id) : null;
+    }
+
+    public function _findAllWithin(string $parentId, string $selector): array {
+        $ids = $this->evaluate(<<<JS
+        (() => {
+            const parent = window.__dcd__.get({$this->_json($parentId)});
+            if (!parent) return [];
+            return Array.from(
+                parent.querySelectorAll({$this->_json($selector)})
+            ).map(el => window.__dcd__.register(el));
+        })()
+        JS);
+        return array_map(fn($id) => new Element($this, $id), $ids ?? []);
+    }
+
+    public function _closest(string $elId, string $selector): ?Element {
+        $id = $this->evaluate(
+            'window.__dcd__.register(window.__dcd__.get(' .
+            json_encode($elId) . ')?.closest(' .
+            json_encode($selector) . '))'
+        );
+        return $id !== null ? new Element($this, $id) : null;
+    }
+
+    public function _getElementText(string $elId): string {
+        $text = $this->evaluate(
+            'window.__dcd__.get(' . json_encode($elId) .
+            ')?.textContent?.trim() ?? \'\''
+        );
+        return (string) $text;
+    }
+
+    public function _clickElement(string $elId): void {
+        $this->evaluate(
+            'window.__dcd__.get(' . json_encode($elId) . ')?.click()'
+        );
+    }
+
+    public function _fillElement(string $elId, string $value): void {
+        $this->evaluate(<<<JS
+        (() => {
+            const el = window.__dcd__.get({$this->_json($elId)});
+            if (!el) return;
+            el.value = {$this->_json($value)};
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        })()
+        JS);
+    }
+
+    public function _isElementVisible(string $elId): bool {
+        $visible = $this->evaluate(<<<JS
+        (() => {
+            const el = window.__dcd__.get({$this->_json($elId)});
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden'
+                && el.offsetParent !== null;
+        })()
+        JS);
+        return (bool) $visible;
+    }
+
+    public function _getElementAttr(string $elId, string $name): ?string {
+        return $this->evaluate(
+            'window.__dcd__.get(' . json_encode($elId) .
+            ')?.getAttribute(' . json_encode($name) . ') ?? null'
+        );
+    }
+
+    /**
+     * Helper interno — json_encode abreviado para
+     * interpolación en heredocs JS.
+     */
+    private function _json($value): string {
+        return json_encode($value);
     }
 }

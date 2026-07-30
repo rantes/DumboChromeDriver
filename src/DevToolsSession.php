@@ -94,6 +94,17 @@ class DevToolsSession {
      * (RFC 6455 — cliente debe enmascarar el payload).
      */
     private function _writeFrame(string $data): void {
+        $frame = $this->encodeFrame($data);
+        socket_write($this->_socket, $frame, strlen($frame));
+    }
+
+    /**
+     * Codifica un frame WebSocket de texto — pura, sin I/O.
+     * Extraída de _writeFrame() para poder probarla sin
+     * socket real; _writeFrame() es un wrapper delgado que
+     * llama a esta función y escribe el resultado.
+     */
+    public function encodeFrame(string $data): string {
         $length = strlen($data);
         $mask   = random_bytes(4);
         $frame  = chr(0x81); // FIN + opcode texto
@@ -112,7 +123,7 @@ class DevToolsSession {
             $frame .= $data[$i] ^ $mask[$i % 4];
         endfor;
 
-        socket_write($this->_socket, $frame, strlen($frame));
+        return $frame;
     }
 
     /**
@@ -155,15 +166,17 @@ class DevToolsSession {
             );
         endif;
 
-        $byte2 = ord($header[1]);
-        $length = $byte2 & 0x7F;
+        $decoded = $this->decodeFrameHeader($header);
+        $length = $decoded['length'];
 
-        if ($length === 126):
-            $ext = socket_read($this->_socket, 2);
-            $length = unpack('n', $ext)[1];
-        elseif ($length === 127):
-            $ext = socket_read($this->_socket, 8);
-            $length = unpack('J', $ext)[1];
+        if ($decoded['extended']):
+            if ($length === 126):
+                $ext = socket_read($this->_socket, 2);
+                $length = unpack('n', $ext)[1];
+            else: // 127
+                $ext = socket_read($this->_socket, 8);
+                $length = unpack('J', $ext)[1];
+            endif;
         endif;
 
         $payload = '';
@@ -178,6 +191,21 @@ class DevToolsSession {
         endwhile;
 
         return $payload;
+    }
+
+    /**
+     * Decodifica el header de un frame WebSocket ya leído
+     * (los primeros 2 bytes) — retorna la longitud codificada
+     * en los 7 bits bajos del segundo byte y si requiere
+     * lectura extendida (126/127 son marcadores, no la
+     * longitud real; el llamador debe leer 2 u 8 bytes más
+     * del socket y decodificarlos con unpack según cuál de
+     * los dos marcadores sea). Pura, sin I/O.
+     */
+    public function decodeFrameHeader(string $header): array {
+        $byte2 = ord($header[1]);
+        $length = $byte2 & 0x7F;
+        return ['length' => $length, 'extended' => $length >= 126];
     }
 
     public function close(): void {
