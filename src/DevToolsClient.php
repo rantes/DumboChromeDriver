@@ -103,11 +103,20 @@ class DevToolsClient {
     }
 
     /**
-     * Llena un input/select y dispara 'input' y 'change' —
-     * varios componentes DumboJS (dmb-input, dmb-select)
-     * escuchan eventos nativos del DOM para actualizar su
-     * estado interno; un simple .value= sin eventos no sería
-     * detectado por los componentes.
+     * Llena un input/select y dispara 'input', 'change' y
+     * 'blur' — varios componentes DumboJS (dmb-input,
+     * dmb-select) escuchan eventos nativos del DOM para
+     * actualizar su estado interno; un simple .value= sin
+     * eventos no sería detectado por los componentes.
+     *
+     * 'blur' es imprescindible, no cosmético: dmb-input solo
+     * marca el campo con el atributo `valid` en su listener de
+     * blur (ver dmb-input.directive.js), y dmb-form.validateForm()
+     * exige ese atributo antes de permitir el submit — sin
+     * disparar blur, cualquier formulario con validate="required"
+     * queda "inválido" en silencio (reportValidity()/focus(), sin
+     * excepción visible) y submit() nunca invoca su callback.
+     * Confirmado empíricamente contra el login real de Komodo.
      */
     public function fill(string $selector, string $value): void {
         $selectorJson = json_encode($selector);
@@ -120,6 +129,7 @@ class DevToolsClient {
             el.value = {$valueJson};
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
             return 'OK';
         })()
         JS);

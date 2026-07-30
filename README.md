@@ -162,7 +162,7 @@ en el futuro se agrega un transporte alternativo
 ## Independencia de DumboPHP
 
 Este proyecto no depende de DumboPHP en ningún punto —
-es una librería de automatización de navegador de
+es una herramienta de automatización de navegador de
 propósito general. Se instala junto a DumboPHP en `/etc/`
 por convención del ecosistema, pero funciona con
 cualquier proyecto PHP.
