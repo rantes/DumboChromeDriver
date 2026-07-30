@@ -7,6 +7,7 @@ class ChromeProcess {
     private string $_binaryPath;
     private int $_debugPort;
     private string $_targetUrl = '';
+    private string $_profileDir = '';
 
     public function __construct(
         string $binaryPath, int $debugPort = 9222
@@ -60,11 +61,24 @@ class ChromeProcess {
 
     /**
      * Lanza Chrome headless con el puerto de debugging
-     * abierto. Espera hasta que el puerto responda antes
-     * de retornar (con timeout).
+     * abierto, sobre un perfil de usuario temporal y
+     * completamente aislado (--user-data-dir) — sin esto,
+     * Chrome reutiliza el perfil real del sistema entre
+     * corridas, y el Service Worker de la app cachea
+     * HTML/JS obsoleto, cookies/sesiones persisten, y
+     * extensiones del perfil real contaminan /json
+     * (confirmado empíricamente: ver nota en
+     * getWebSocketUrl()). El perfil se crea aquí y se
+     * elimina en stop().
+     *
+     * Espera hasta que el puerto responda antes de
+     * retornar (con timeout).
      */
     public function start(string $url = 'about:blank'): void {
+        // Bloque de definiciones
         $this->_targetUrl = $url;
+        $this->_profileDir = sys_get_temp_dir()
+            . '/dumbo-chromedriver-profile-' . uniqid();
         $descriptors = [
             0 => ['pipe', 'r'],
             1 => ['pipe', 'w'],
@@ -72,10 +86,18 @@ class ChromeProcess {
                 . '/dumbo-chromedriver-error.log', 'a'],
         ];
 
+        // Lógica
+        mkdir($this->_profileDir, 0700, true);
+
         $command = escapeshellarg($this->_binaryPath) . ' '
             . '--headless=new '
             . '--disable-gpu '
             . '--no-sandbox '
+            . '--user-data-dir=' . escapeshellarg($this->_profileDir) . ' '
+            . '--disable-extensions '
+            . '--disable-sync '
+            . '--no-first-run '
+            . '--disable-background-networking '
             . "--remote-debugging-port={$this->_debugPort} "
             . escapeshellarg($url);
 
@@ -135,13 +157,12 @@ class ChromeProcess {
      * empíricamente). Leyendo manualmente hasta completar
      * Content-Length evitamos depender del cierre del socket.
      *
-     * $targets[0] NO es fiable: Chrome (sin --user-data-dir)
-     * reutiliza el perfil real del sistema, y /json devuelve
-     * también páginas de fondo de extensiones instaladas antes
-     * que la pestaña navegada — confirmado empíricamente
-     * (location.href resultaba ser una extensión, nunca la URL
-     * pedida). Se filtra por type=page y se prioriza la que
-     * coincide con la URL solicitada en start().
+     * $targets[0] NO es fiable: incluso con --user-data-dir
+     * aislado, /json puede seguir devolviendo páginas de fondo
+     * de extensiones (confirmado empíricamente — algunas se
+     * fuerzan por política del sistema, no por el perfil) antes
+     * que la pestaña navegada. Se filtra por type=page y se
+     * prioriza la que coincide con la URL solicitada en start().
      */
     public function getWebSocketUrl(): string {
         $json = $this->_httpGetJson('/json');
@@ -241,6 +262,31 @@ class ChromeProcess {
         shell_exec(
             "pkill -9 -f 'remote-debugging-port={$this->_debugPort}\\b' 2>/dev/null"
         );
+
+        // Limpia el perfil temporal creado en start() — sin esto,
+        // cada corrida deja basura acumulándose en el sistema.
+        // Se hace después del pkill para minimizar la chance de
+        // que Chrome siga escribiendo en el directorio mientras
+        // lo borramos.
+        if ($this->_profileDir !== '' && is_dir($this->_profileDir)):
+            $this->_removeDirectory($this->_profileDir);
+            $this->_profileDir = '';
+        endif;
+    }
+
+    /**
+     * Elimina recursivamente un directorio — necesario porque el
+     * perfil de Chrome genera muchos archivos y subcarpetas
+     * (cache, cookies, etc.) que rmdir() simple no puede borrar.
+     */
+    private function _removeDirectory(string $dir): void {
+        $items = scandir($dir);
+        foreach ($items as $item):
+            if ($item === '.' || $item === '..') continue;
+            $path = "{$dir}/{$item}";
+            is_dir($path) ? $this->_removeDirectory($path) : unlink($path);
+        endforeach;
+        rmdir($dir);
     }
 
     public function __destruct() {

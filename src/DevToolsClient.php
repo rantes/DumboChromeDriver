@@ -27,6 +27,19 @@ class DevToolsClient {
 
         // Habilitar el dominio Runtime antes de evaluar
         $this->_session->send('Runtime.enable');
+
+        // _waitForPort() (dentro de _process->start()) solo espera a
+        // que el puerto de debugging responda — NO a que la navegación
+        // inicial (la URL pasada por línea de comandos a Chrome) haya
+        // terminado. Sin esto, un navigate()/evaluate() inmediato puede
+        // ganarle la carrera a esa navegación todavía en curso: la
+        // reasignación de window.location.href se pierde cuando la
+        // navegación original (a la URL de start()) termina de cargar
+        // después y sobrescribe lo que acabamos de hacer — confirmado
+        // empíricamente contra el login real de Komodo (start() a la
+        // URL base + navigate() inmediato al login quedaba varado en
+        // la URL base con el body vacío).
+        $this->_waitForLoad();
         $this->_initElementRegistry();
     }
 
@@ -161,6 +174,64 @@ class DevToolsClient {
     }
 
     /**
+     * Reintenta una acción hasta que la condición de éxito se
+     * cumpla, o se agote el timeout. Agnóstico al framework —
+     * $action y $condition son closures que el llamador define
+     * en términos de comportamiento observable (ej: "la URL
+     * cambió"), no de implementación interna de ningún framework.
+     *
+     * Útil para acciones cuyo efecto depende de lógica JS que
+     * puede no estar conectada todavía aunque el elemento ya sea
+     * visualmente interactuable (ej: un formulario cuyo callback
+     * de submit se conecta en un módulo JS separado del que
+     * renderiza el input) — waitUntilInteractable() verifica que
+     * el elemento SE VE listo, no que su lógica de negocio ya
+     * esté conectada; ese es un límite genuino de cualquier
+     * verificación basada en DOM/CSS, sin importar el framework.
+     *
+     * RIESGO A TENER EN CUENTA — no es un reemplazo universal de
+     * click(): si la primera ejecución de $action() SÍ tuvo efecto
+     * pero $condition() tardó en reflejarlo, la siguiente iteración
+     * repite la acción, pudiendo ejecutarla dos veces. Para un
+     * login esto es inofensivo (la segunda vez ya hay sesión
+     * iniciada y redirige igual). Para un formulario que crea un
+     * registro (ej: un POST que inserta una fila), reintentar el
+     * submit puede crear un duplicado — se debe usar con criterio
+     * en cada E2E, evaluando si la acción es idempotente, no
+     * aplicarlo ciegamente en cualquier submit.
+     */
+    public function retryUntil(
+        callable $action,
+        callable $condition,
+        int $timeoutMs = 15000,
+        int $retryIntervalMs = 500
+    ): void {
+        $elapsed = 0;
+        $success = false;
+
+        while ($elapsed < $timeoutMs && !$success):
+            $action();
+            usleep(300000); // 300ms — da tiempo a que la
+                             // acción tenga efecto antes
+                             // de verificar la condición
+            $success = (bool) $condition();
+
+            if (!$success):
+                usleep($retryIntervalMs * 1000);
+                $elapsed += $retryIntervalMs + 300;
+            endif;
+        endwhile;
+
+        if (!$success):
+            throw new DevToolsException(
+                "retryUntil() agotó el timeout de " .
+                "{$timeoutMs}ms sin que la condición " .
+                "se cumpliera."
+            );
+        endif;
+    }
+
+    /**
      * Espera hasta que un selector exista en el DOM, con
      * timeout — esencial para paneles/contenido async
      * (dmb-panel con fetch, respuestas AJAX de
@@ -190,6 +261,55 @@ class DevToolsClient {
             throw new DevToolsException(
                 "Timeout esperando el elemento '{$selector}' " .
                 "después de {$timeoutMs}ms."
+            );
+        endif;
+    }
+
+    /**
+     * Espera hasta que un elemento exista Y sea interactuable —
+     * visible, con dimensiones reales, no deshabilitado. Criterio
+     * 100% estándar del DOM, sin depender de ningún framework o
+     * convención de atributos custom (no 'rendered' ni nada
+     * específico de DumboJS/React/Vue/Angular). Resuelve el caso
+     * de componentes con renderizado asíncrono (Web Components o
+     * cualquier framework) cuyo tag existe en el HTML servido
+     * antes de que su contenido interno esté listo — dimensiones
+     * 0x0 capturan ese estado indirectamente, sin necesitar saber
+     * nada sobre cómo el framework marca "ya terminé de montar".
+     */
+    public function waitUntilInteractable(
+        string $selector, int $timeoutMs = 10000
+    ): void {
+        $selectorJson = json_encode($selector);
+        $elapsed = 0;
+        $interval = 100;
+        $ready = false;
+
+        while ($elapsed < $timeoutMs && !$ready):
+            $ready = (bool) $this->evaluate(<<<JS
+            (() => {
+                const el = document.querySelector({$selectorJson});
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && rect.width > 0
+                    && rect.height > 0
+                    && !el.disabled;
+            })()
+            JS);
+            if (!$ready):
+                usleep($interval * 1000);
+                $elapsed += $interval;
+            endif;
+        endwhile;
+
+        if (!$ready):
+            throw new DevToolsException(
+                "Timeout esperando que '{$selector}' esté " .
+                "interactuable (visible, con dimensiones, " .
+                "habilitado) después de {$timeoutMs}ms."
             );
         endif;
     }

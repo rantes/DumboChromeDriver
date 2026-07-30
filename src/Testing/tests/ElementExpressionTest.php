@@ -1,7 +1,7 @@
 <?php
 namespace DumboChromeDriver\Testing\Tests;
 
-use function DumboChromeDriver\Testing\{assertEquals, assertTrue};
+use function DumboChromeDriver\Testing\{assertEquals, assertTrue, assertFalse};
 
 return function (\DumboChromeDriver\Testing\TestRunner $runner) {
 
@@ -22,5 +22,30 @@ return function (\DumboChromeDriver\Testing\TestRunner $runner) {
         $decoded = json_decode($encoded);
         assertEquals($text, $decoded);
     });
+
+    $runner->register(
+        'waitUntilInteractable no depende de atributos de framework',
+        function () {
+            // Verifica que el código fuente del método no contiene
+            // referencias hardcodeadas a convenciones de un
+            // framework específico (ej: el atributo 'rendered' de
+            // DumboJS) — el criterio debe ser 100% estándar del DOM
+            // (visible, con dimensiones, no deshabilitado), válido
+            // sin importar qué framework generó el elemento.
+            $source = file_get_contents(
+                __DIR__ . '/../../DevToolsClient.php'
+            );
+            $method = substr(
+                $source,
+                strpos($source, 'function waitUntilInteractable'),
+                1000
+            );
+            assertFalse(
+                str_contains($method, "hasAttribute('rendered')"),
+                'waitUntilInteractable no debe depender de ' .
+                'atributos custom de un framework específico'
+            );
+        }
+    );
 
 };
