@@ -81,7 +81,7 @@ class DevToolsSession {
         $payload = json_encode([
             'id'     => $id,
             'method' => $method,
-            'params' => $params,
+            'params' => empty($params) ? new \stdClass() : $params,
         ]);
 
         $this->_writeFrame($payload);
