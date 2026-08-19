@@ -72,6 +72,36 @@ class DevToolsClient {
     }
 
     /**
+     * Passthrough genérico a cualquier método del protocolo
+     * DevTools sin necesidad de un wrapper dedicado por dominio
+     * (Page, Network, Log, etc.) — mismo mecanismo síncrono
+     * request/response que ya usa evaluate() internamente.
+     */
+    public function sendRaw(string $method, array $params = []): array {
+        return $this->_session->send($method, $params);
+    }
+
+    /**
+     * Captura un screenshot PNG de la página actual y lo guarda
+     * en $path — evidencia visual real, no solo DOM/texto.
+     */
+    public function screenshot(string $path): void {
+        $response = $this->sendRaw('Page.captureScreenshot', [
+            'format' => 'png',
+        ]);
+
+        $data = $response['result']['data'] ?? null;
+
+        if (empty($data)):
+            throw new DevToolsException(
+                'Page.captureScreenshot no devolvió datos.'
+            );
+        endif;
+
+        file_put_contents($path, base64_decode($data));
+    }
+
+    /**
      * Navega a una URL asignando window.location.href vía
      * evaluate() — sin Page.navigate, reutilizando el mismo
      * mecanismo ya probado. La navegación es asíncrona, por

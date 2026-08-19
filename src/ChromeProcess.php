@@ -98,6 +98,7 @@ class ChromeProcess {
             . '--disable-sync '
             . '--no-first-run '
             . '--disable-background-networking '
+            . '--ignore-certificate-errors '
             . "--remote-debugging-port={$this->_debugPort} "
             . escapeshellarg($url);
 
