@@ -189,6 +189,25 @@ class ChromeProcess {
     }
 
     /**
+     * Targets de Chrome de un tipo dado (ej. 'service_worker'),
+     * leídos del mismo endpoint /json que getWebSocketUrl(). Cada
+     * uno trae su propio webSocketDebuggerUrl — los Service Workers
+     * son targets separados de la página y NO heredan las sesiones
+     * ni emulaciones de red de ésta.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function getTargetsByType(string $type): array {
+        $targets = json_decode($this->_httpGetJson('/json'), true);
+
+        return array_values(array_filter(
+            (array) $targets,
+            fn($t) => ($t['type'] ?? '') === $type
+                && !empty($t['webSocketDebuggerUrl'])
+        ));
+    }
+
+    /**
      * GET simple sobre un socket crudo contra el endpoint HTTP
      * de DevTools, leyendo exactamente Content-Length bytes de
      * cuerpo en vez de esperar a que el servidor cierre el

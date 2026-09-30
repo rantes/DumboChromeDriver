@@ -4,6 +4,9 @@ namespace DumboChromeDriver;
 class DevToolsClient {
     private ChromeProcess $_process;
     private DevToolsSession $_session;
+    private ?array $_networkConditions = null;
+    /** @var array<string,DevToolsSession> sesiones por webSocketDebuggerUrl de cada Service Worker */
+    private array $_workerSessions = [];
 
     public function __construct(
         string $binaryPath = '', int $debugPort = 9222
@@ -67,6 +70,10 @@ class DevToolsClient {
     }
 
     public function stop(): void {
+        foreach ($this->_workerSessions as $session):
+            $session->close();
+        endforeach;
+        $this->_workerSessions = [];
         $this->_session->close();
         $this->_process->stop();
     }
@@ -78,7 +85,64 @@ class DevToolsClient {
      * request/response que ya usa evaluate() internamente.
      */
     public function sendRaw(string $method, array $params = []): array {
-        return $this->_session->send($method, $params);
+        $response = $this->_session->send($method, $params);
+
+        if ($method === 'Network.emulateNetworkConditions'):
+            $this->_networkConditions = $params;
+            $this->syncWorkerNetworkConditions();
+        endif;
+
+        return $response;
+    }
+
+    /**
+     * Replica en cada Service Worker vivo la última emulación de red
+     * enviada a la página con Network.emulateNetworkConditions.
+     * Un Service Worker es un target separado: sin esto, su fetch()
+     * sigue alcanzando la red real aunque la página esté en offline
+     * emulado. Es idempotente; llamarla tras una navegación cubre un
+     * worker que arrancó después de la emulación. No hace nada si
+     * nunca se emuló red.
+     */
+    public function syncWorkerNetworkConditions(): void {
+        if ($this->_networkConditions !== null):
+            $live = [];
+            foreach ($this->_process->getTargetsByType('service_worker') as $target):
+                $url        = $target['webSocketDebuggerUrl'];
+                $live[$url] = $this->_workerSession($url);
+                $this->_applyNetworkConditions($url, $live[$url]);
+            endforeach;
+            $this->_dropStaleWorkerSessions($live);
+        endif;
+    }
+
+    /** Sesión DevTools del worker, creada y con Network habilitado la primera vez. */
+    private function _workerSession(string $url): DevToolsSession {
+        if (!isset($this->_workerSessions[$url])):
+            $session = new DevToolsSession($url);
+            $session->connect();
+            $session->send('Network.enable');
+            $this->_workerSessions[$url] = $session;
+        endif;
+
+        return $this->_workerSessions[$url];
+    }
+
+    private function _applyNetworkConditions(string $url, DevToolsSession $session): void {
+        try {
+            $session->send('Network.emulateNetworkConditions', $this->_networkConditions);
+        } catch (DevToolsException $e) {
+            // Worker terminado entre el listado y el envío: se descarta.
+            unset($this->_workerSessions[$url]);
+        }
+    }
+
+    /** Cierra las sesiones de workers que ya no aparecen en /json. */
+    private function _dropStaleWorkerSessions(array $live): void {
+        foreach (array_diff_key($this->_workerSessions, $live) as $url => $session):
+            $session->close();
+            unset($this->_workerSessions[$url]);
+        endforeach;
     }
 
     /**
@@ -115,6 +179,7 @@ class DevToolsClient {
         // Una navegación real recarga la página — borra
         // window.__dcd__ y todos los ids registrados. Los
         // Element de la página anterior dejan de ser válidos.
+        $this->syncWorkerNetworkConditions();
         $this->_initElementRegistry();
     }
 
